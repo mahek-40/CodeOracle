@@ -1,0 +1,30 @@
+services:
+  # ─── Option 1: Backend Web Service (Docker) ──────────────────────────────
+  - type: web
+    name: codeoracle-backend
+    env: docker
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /api/health
+    envVars:
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: PORT
+        value: 8000
+      - key: ENV
+        value: production
+      - key: ALLOWED_ORIGINS
+        value: "*"
+
+  # ─── Option 2: Static Site Frontend (Vite + React) ────────────────────────
+  - type: web
+    name: codeoracle-frontend
+    env: static
+    buildCommand: cd frontend && npm install && npm run build
+    staticPublishPath: ./frontend/dist
+    envVars:
+      - key: VITE_API_BASE_URL
+        value: https://codeoracle-backend.onrender.com
+    routes:
+      - type: rewrite
+        source: /*
+        destination: /index.html
