@@ -72,8 +72,8 @@ def test_parse_vitest_output():
 # ─── DockerRunner Unit Tests ─────────────────────────────────────────────────
 
 def test_docker_runner_unavailable():
-    """Verify runner fails safely when Docker is not accessible."""
-    runner = DockerRunner()
+    """Verify runner fails safely when Docker is not accessible in strict sandboxing mode."""
+    runner = DockerRunner(allow_local_fallback=False)
     with patch.object(runner, "is_docker_available", return_value=(False, "Docker daemon not running")):
         with tempfile.TemporaryDirectory() as tmp_dir:
             result = runner.run_tests(tmp_dir, language="python")
@@ -81,6 +81,18 @@ def test_docker_runner_unavailable():
             assert result.status == "docker_unavailable"
             assert result.sandboxed is True
             assert "Docker isolation is unavailable" in result.error
+
+
+def test_docker_runner_subprocess_fallback():
+    """Verify runner falls back to subprocess when Docker is not accessible and fallback is enabled."""
+    runner = DockerRunner(allow_local_fallback=True)
+    with patch.object(runner, "is_docker_available", return_value=(False, "Docker daemon not running")):
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            # Without generated_tests folder, should report missing tests
+            result = runner.run_tests(tmp_dir, language="python")
+            assert isinstance(result, TestExecutionResult)
+            assert result.status == "error"
+            assert "No generated tests found" in result.error
 
 
 def test_docker_runner_missing_tests_dir():

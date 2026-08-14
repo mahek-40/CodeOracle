@@ -14,6 +14,7 @@ import {
   Download,
   ChevronsUpDown,
   Sparkles,
+  RefreshCw,
 } from 'lucide-react';
 import { downloadFile } from '../utils/export';
 
@@ -267,8 +268,10 @@ export default function ExplanationView({
     downloadFile('codeoracle_explanation_report.md', md, 'text/markdown');
   }
 
+  const effectiveError = error || (explanation?.error ? explanation.error : null);
+
   // Not yet loaded
-  if (!explanation && !loading && !error) {
+  if (!explanation && !loading && !effectiveError) {
     return (
       <div className="flex flex-col items-center justify-center h-full gap-4">
         <div className="text-center space-y-2">
@@ -284,7 +287,7 @@ export default function ExplanationView({
         </div>
         <button
           onClick={onLoad}
-          className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-xs font-medium px-5 py-2.5 rounded-lg transition-all shadow-lg shadow-cyan-500/20 cursor-pointer"
+          className="flex items-center gap-2 bg-gradient-to-r from-blue-600 to-cyan-500 hover:from-blue-500 hover:to-cyan-400 text-white text-xs font-medium px-5 py-2.5 rounded-lg transition-all shadow-lg shadow-cyan-500/20 cursor-pointer font-mono"
         >
           <Sparkles className="h-4 w-4" />
           <span>Generate Explanation</span>
@@ -297,7 +300,7 @@ export default function ExplanationView({
     return (
       <div className="flex flex-col items-center justify-center h-full gap-3 text-slate-400">
         <div className="h-8 w-8 rounded-full border-2 border-cyan-400 border-t-transparent animate-spin" />
-        <p className="text-sm">Asking Gemini to explain your codebase…</p>
+        <p className="text-sm font-semibold text-slate-200">Asking Gemini to explain your codebase…</p>
         <p className="text-xs text-slate-500 font-mono">
           Building hierarchical repository, file, and function context.
         </p>
@@ -305,21 +308,27 @@ export default function ExplanationView({
     );
   }
 
-  if (error) {
+  if (effectiveError) {
     return (
-      <div className="flex flex-col items-center justify-center h-full gap-4">
-        <div className="flex items-start gap-3 text-rose-300 bg-rose-950/30 border border-rose-800/50 rounded-xl px-5 py-4 max-w-md text-sm">
-          <AlertTriangle size={18} className="flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="font-semibold mb-1">Explanation failed</p>
-            <p className="text-xs text-rose-400/80">{error}</p>
+      <div className="flex flex-col items-center justify-center h-full gap-4 p-6">
+        <div className="flex items-start gap-3 text-rose-300 bg-rose-950/40 border border-rose-800/60 rounded-xl p-5 max-w-lg text-sm shadow-xl font-mono">
+          <AlertTriangle size={20} className="flex-shrink-0 mt-0.5 text-rose-400" />
+          <div className="space-y-1.5">
+            <p className="font-bold text-white text-base">Explanation Generation Failed</p>
+            <p className="text-xs text-rose-300 leading-relaxed">{effectiveError}</p>
+            {effectiveError.toLowerCase().includes('key') && (
+              <p className="text-[11px] text-amber-300/90 pt-1">
+                Tip: Configure <code className="bg-black/40 px-1 py-0.5 rounded text-amber-200">GEMINI_API_KEY</code> in server environment variables to enable AI explanations.
+              </p>
+            )}
           </div>
         </div>
         <button
           onClick={onLoad}
-          className="text-xs text-slate-400 hover:text-white border border-[#1E293B] hover:border-[#2A364F] px-4 py-2 rounded-lg transition-colors cursor-pointer"
+          className="flex items-center gap-2 text-xs text-cyan-300 hover:text-white bg-[#151C2C] border border-cyan-800/60 hover:bg-cyan-900/40 px-5 py-2.5 rounded-lg transition-colors cursor-pointer font-mono font-medium shadow-md"
         >
-          Retry Explanation
+          <RefreshCw size={13} />
+          <span>Retry Explanation</span>
         </button>
       </div>
     );

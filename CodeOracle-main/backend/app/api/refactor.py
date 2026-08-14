@@ -54,7 +54,7 @@ async def generate_refactor(job_id: str):
         graph = graph_builder.build(project_analysis)
 
         result = refactoring_engine.generate_refactor(project_analysis, job_dir, graph)
-        job["refactor_result"] = result.model_dump()
+        job_manager.save_job_field(job_id, "refactor_result", result.model_dump())
         return result.model_dump()
 
     except AIKeyMissingError as exc:
@@ -171,9 +171,11 @@ async def validate_refactor(job_id: str):
         comparison = refactor_validator.validate_refactor(
             job_dir, project_analysis, orig_exec, orig_cov
         )
-        job["refactor_validation"] = comparison.model_dump()
-        if "refactor_result" in job and isinstance(job["refactor_result"], dict):
+        job_manager.save_job_field(job_id, "refactor_validation", comparison.model_dump())
+        job = job_manager.get_job(job_id)
+        if job and "refactor_result" in job and isinstance(job["refactor_result"], dict):
             job["refactor_result"]["validation"] = comparison.model_dump()
+            job_manager.save_job_field(job_id, "refactor_result", job["refactor_result"])
 
         return comparison.model_dump()
 

@@ -66,6 +66,11 @@ export const RefactoredCodeView: React.FC<RefactoredCodeViewProps> = ({
       if (data.files.length > 0) {
         setSelectedIndex(0);
       }
+      if (data.status === 'failed' && data.error) {
+        setError(data.error);
+      } else if (data.files.length > 0 && data.files.every(f => f.error)) {
+        setError(data.files[0].error || 'Refactoring generation failed for all files.');
+      }
       setActiveTab('split');
     } catch (err: any) {
       setError(err.message || 'Failed to generate refactoring proposal.');

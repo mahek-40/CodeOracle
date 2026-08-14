@@ -72,9 +72,12 @@ class GeminiProvider:
     Uses the google-genai SDK. API key comes from environment only.
     """
 
-    MODEL_NAME = "gemini-2.0-flash"
     TIMEOUT_SECONDS = 30
     MAX_RETRIES = 2
+
+    @property
+    def MODEL_NAME(self) -> str:
+        return settings.GEMINI_MODEL or "gemini-2.5-flash"
 
     def __init__(self):
         self._client = None
@@ -102,54 +105,62 @@ class GeminiProvider:
         Handles quota, timeout, and service failures with appropriate error types.
         """
         client = self._get_client()
+        candidate_models = [self.MODEL_NAME, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
+        # Deduplicate while preserving order
+        candidate_models = list(dict.fromkeys(candidate_models))
 
-        attempt = 0
-        while attempt <= self.MAX_RETRIES:
-            try:
-                from google.genai import types as genai_types
-                response = client.models.generate_content(
-                    model=self.MODEL_NAME,
-                    contents=prompt,
-                    config=genai_types.GenerateContentConfig(
-                        temperature=temperature,
-                        max_output_tokens=8192,
+        for model_name in candidate_models:
+            attempt = 0
+            while attempt <= self.MAX_RETRIES:
+                try:
+                    from google.genai import types as genai_types
+                    response = client.models.generate_content(
+                        model=model_name,
+                        contents=prompt,
+                        config=genai_types.GenerateContentConfig(
+                            temperature=temperature,
+                            max_output_tokens=8192,
+                        )
                     )
-                )
 
-                # Validate response
-                if not response or not response.text:
-                    raise AIResponseError("Empty text in Gemini response.")
+                    # Validate response
+                    if not response or not response.text:
+                        raise AIResponseError("Empty text in Gemini response.")
 
-                return response.text.strip()
+                    return response.text.strip()
 
-            except AIProviderError:
-                raise
-            except Exception as exc:
-                err_str = str(exc).lower()
+                except AIProviderError:
+                    raise
+                except Exception as exc:
+                    err_str = str(exc).lower()
 
-                if "429" in err_str or "quota" in err_str or "rate" in err_str:
-                    if attempt < self.MAX_RETRIES:
-                        time.sleep(2 ** attempt)
-                        attempt += 1
-                        continue
-                    raise AIQuotaError(str(exc))
+                    if "not_found" in err_str or "404" in err_str or "no longer available" in err_str:
+                        # Model not available in this region/tier, try next candidate model
+                        break
 
-                if "timeout" in err_str or "deadline" in err_str or "timed out" in err_str:
-                    raise AITimeoutError()
+                    if "429" in err_str or "quota" in err_str or "rate" in err_str:
+                        if attempt < self.MAX_RETRIES:
+                            time.sleep(2 ** attempt)
+                            attempt += 1
+                            continue
+                        raise AIQuotaError(str(exc))
 
-                if "invalid" in err_str and "key" in err_str:
-                    raise AIKeyMissingError()
+                    if "timeout" in err_str or "deadline" in err_str or "timed out" in err_str:
+                        raise AITimeoutError()
 
-                if "500" in err_str or "503" in err_str or "unavailable" in err_str:
-                    if attempt < self.MAX_RETRIES:
-                        time.sleep(1)
-                        attempt += 1
-                        continue
+                    if "invalid" in err_str and "key" in err_str:
+                        raise AIKeyMissingError()
+
+                    if "500" in err_str or "503" in err_str or "unavailable" in err_str:
+                        if attempt < self.MAX_RETRIES:
+                            time.sleep(1)
+                            attempt += 1
+                            continue
+                        raise AIServiceError(str(exc))
+
                     raise AIServiceError(str(exc))
 
-                raise AIServiceError(str(exc))
-
-        raise AIServiceError("Max retries exhausted.")
+        raise AIServiceError(f"No suitable Gemini model found among {candidate_models}.")
 
 
 # Global singleton — the rest of the application uses this

@@ -11,6 +11,7 @@ class Settings(BaseModel):
     ENVIRONMENT: str = os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")
     PORT: int = int(os.getenv("PORT", "8000"))
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
+    GEMINI_MODEL: str = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
     TEMP_DIR: str = os.getenv("CODEORACLE_TEMP_DIR", "")
     ALLOWED_ORIGINS: List[str] = [
         origin.strip()

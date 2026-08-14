@@ -401,6 +401,12 @@ function ResultsView({
     fetchJobRefactor(job.job_id).then(setRefactorData).catch(() => null);
   }, [job.job_id]);
 
+  useEffect(() => {
+    if (activeTab === 'explanation' && !explanation && !explanationLoading && !explanationError) {
+      onLoadExplanation();
+    }
+  }, [activeTab, explanation, explanationLoading, explanationError, onLoadExplanation]);
+
   const tabs = [
     { id: 'graph', label: 'Dependency Graph', icon: Network },
     { id: 'explanation', label: 'Explanation', icon: Sparkles },
@@ -674,6 +680,9 @@ export const App: React.FC = () => {
     setExplanationError(null);
     try {
       const data = await fetchJobExplanation(currentJob.job_id);
+      if (data.error) {
+        setExplanationError(data.error);
+      }
       setExplanation(data);
     } catch (err: any) {
       setExplanationError(err.message || 'Failed to generate explanation');

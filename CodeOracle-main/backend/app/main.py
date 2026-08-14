@@ -15,6 +15,7 @@ from app.api.explain import router as explain_router
 from app.api.tests import router as tests_router
 from app.api.coverage import router as coverage_router
 from app.api.refactor import router as refactor_router
+from app.api.diagnostics import router as diagnostics_router
 
 app = FastAPI(
     title=settings.APP_NAME,
@@ -51,6 +52,7 @@ app.include_router(explain_router, prefix=settings.API_V1_STR)
 app.include_router(tests_router, prefix=settings.API_V1_STR)
 app.include_router(coverage_router, prefix=settings.API_V1_STR)
 app.include_router(refactor_router, prefix=settings.API_V1_STR)
+app.include_router(diagnostics_router, prefix=settings.API_V1_STR)
 
 # Root health check endpoint
 app.include_router(health_router, prefix="")

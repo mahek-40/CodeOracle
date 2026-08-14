@@ -35,10 +35,34 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
   onRefreshCoverage,
 }) => {
   const [showLogs, setShowLogs] = React.useState(false);
-  const isFailed = report?.status === 'failed';
-  const currentCoverage = report?.overall_coverage_percent ?? 0;
+
+  if (!report) {
+    return (
+      <div className="flex flex-col items-center justify-center p-12 bg-[#101726] border border-[#1E293B] rounded-xl text-center space-y-4 font-mono">
+        <div className="h-12 w-12 rounded-full bg-cyan-950/40 border border-cyan-800/50 flex items-center justify-center">
+          <Target className="h-6 w-6 text-cyan-400" />
+        </div>
+        <div className="space-y-1">
+          <h3 className="text-base font-bold text-white">No Coverage Data Available Yet</h3>
+          <p className="text-xs text-slate-400 max-w-md leading-relaxed">
+            Click <strong className="text-cyan-300">"Generate Tests"</strong> or <strong className="text-emerald-300">"Run Tests"</strong> above to author unit tests and measure real line coverage.
+          </p>
+        </div>
+        <button
+          onClick={onRefreshCoverage}
+          className="flex items-center gap-2 text-xs text-cyan-300 hover:text-white bg-cyan-950/60 border border-cyan-800/60 hover:bg-cyan-900/50 px-4 py-2 rounded-lg transition-colors cursor-pointer"
+        >
+          <RefreshCw size={13} />
+          <span>Measure Coverage</span>
+        </button>
+      </div>
+    );
+  }
+
+  const isFailed = report.status === 'failed';
+  const currentCoverage = report.overall_coverage_percent ?? 0;
   const isTargetMet = !isFailed && currentCoverage >= 60.0;
-  const files: FileCoverage[] = report?.files ?? [];
+  const files: FileCoverage[] = report.files ?? [];
 
   if (isFailed) {
     return (

@@ -86,6 +86,9 @@ export const GeneratedTestsView: React.FC<GeneratedTestsViewProps> = ({
       if (result.generated_files.length > 0) {
         setSelectedIndex(0);
       }
+      if (result.status === 'failed' && result.error) {
+        setError(result.error);
+      }
     } catch (err: any) {
       setError(err.message || 'Failed to generate test suite.');
     } finally {

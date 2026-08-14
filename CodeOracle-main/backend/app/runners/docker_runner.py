@@ -45,7 +45,7 @@ class DockerRunner:
         memory_limit: str = DEFAULT_MEMORY_LIMIT,
         cpu_limit: str = DEFAULT_CPU_LIMIT,
         pids_limit: str = DEFAULT_PIDS_LIMIT,
-        allow_local_fallback: bool = False,
+        allow_local_fallback: bool = True,
     ):
         self.timeout_seconds = timeout_seconds
         self.memory_limit = memory_limit

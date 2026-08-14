@@ -54,7 +54,7 @@ async def generate_tests_for_job(job_id: str):
         graph = graph_builder.build(project_analysis)
 
         result = test_generator.generate_tests(project_analysis, job_dir, graph)
-        job["test_generation"] = result.model_dump()
+        job_manager.save_job_field(job_id, "test_generation", result.model_dump())
 
         return result.model_dump()
 
@@ -112,7 +112,7 @@ async def run_tests_for_job(job_id: str):
 
     try:
         result = docker_runner.run_tests(job_dir, language=primary_lang, framework=framework)
-        job["test_execution"] = result.model_dump()
+        job_manager.save_job_field(job_id, "test_execution", result.model_dump())
         return result.model_dump()
     except Exception as exc:
         raise HTTPException(

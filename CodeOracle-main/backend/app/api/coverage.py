@@ -51,7 +51,7 @@ async def run_job_coverage(job_id: str):
         graph = graph_builder.build(project_analysis)
 
         report = coverage_engine.measure_coverage(project_analysis, job_dir, graph)
-        job["coverage_report"] = report.model_dump()
+        job_manager.save_job_field(job_id, "coverage_report", report.model_dump())
         return report.model_dump()
 
     except Exception as exc:
@@ -94,9 +94,9 @@ async def improve_job_coverage(job_id: str):
         graph = graph_builder.build(project_analysis)
 
         result = coverage_engine.improve_coverage(project_analysis, job_dir, graph)
-        job["coverage_improvement"] = result.model_dump()
+        job_manager.save_job_field(job_id, "coverage_improvement", result.model_dump())
         if result.latest_report:
-            job["coverage_report"] = result.latest_report.model_dump()
+            job_manager.save_job_field(job_id, "coverage_report", result.latest_report.model_dump())
 
         return result.model_dump()
 
