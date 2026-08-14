@@ -1,12 +1,15 @@
 """
 Test generator pipeline — uses static analysis context and Gemini to generate
 runnable unit test suites (pytest for Python, Vitest for JavaScript).
+Features concurrent generation, test validation, and high performance.
 """
 import os
 import re
 import ast
 import json
 import time
+import logging
+from concurrent.futures import ThreadPoolExecutor
 from typing import Optional, List, Dict
 from app.analyzers.base.schema import ProjectAnalysis, FileAnalysis
 from app.graph.schema import DependencyGraph
@@ -15,14 +18,14 @@ from app.ai.context_builder import ContextBuilder, context_builder
 from app.ai.test_prompts import python_test_generation_prompt, javascript_test_generation_prompt
 from app.runners.schema import GeneratedTestFile, TestGenerationResult
 
-INTER_FILE_DELAY_SECS = 0.2
+logger = logging.getLogger("codeoracle.runners.test_generator")
+MAX_TEST_GENERATION_WORKERS = 3
 
 
 def _clean_code_blocks(text: str) -> str:
     """Strips markdown code fences (```python ... ```) and extracts raw source code."""
     text = text.strip()
     if text.startswith("```"):
-        # Strip opening fence (e.g. ```python, ```javascript, ```)
         lines = text.splitlines()
         if len(lines) > 1 and lines[0].startswith("```"):
             lines = lines[1:]
@@ -35,10 +38,8 @@ def _clean_code_blocks(text: str) -> str:
 def _estimate_test_count(code: str, language: str) -> int:
     """Estimates the number of test cases defined in the test file."""
     if language == "python":
-        # Count def test_...
         return len(re.findall(r"^\s*def\s+test_\w+", code, re.MULTILINE))
     else:
-        # Count it( or test(
         return len(re.findall(r"\b(it|test)\s*\(", code))
 
 
@@ -49,8 +50,6 @@ def _derive_module_name(file_path: str) -> str:
         clean_path = clean_path[:-3]
     elif clean_path.endswith((".js", ".ts", ".jsx", ".tsx")):
         clean_path = clean_path.rsplit(".", 1)[0]
-    
-    # Replace slashes with dots for Python imports or clean path for JS
     return clean_path.replace("/", ".")
 
 
@@ -78,25 +77,20 @@ class TestGenerator:
         Generates runnable unit test files for each source file in the project.
         Saves test files in `{job_dir}/generated_tests/`.
         """
+        t0 = time.perf_counter()
         out_dir = os.path.join(job_dir, "generated_tests")
         os.makedirs(out_dir, exist_ok=True)
 
-        # Primary framework
         primary_lang = project.languages[0] if project.languages else "python"
         framework = "pytest" if primary_lang == "python" else "vitest"
 
-        # Create __init__.py for Python projects to enable discovery
         if "python" in project.languages:
             init_path = os.path.join(out_dir, "__init__.py")
             if not os.path.exists(init_path):
                 with open(init_path, "w", encoding="utf-8") as f:
                     f.write("# Generated test suite package\n")
 
-        generated_files: List[GeneratedTestFile] = []
-        had_error = False
-        overall_error: Optional[str] = None
-
-        # Filter to testable files (ignore existing test files if any)
+        # Filter to testable files
         testable_files = [
             fa for fa in project.files
             if not (fa.path.startswith("test") or "test_" in fa.path or ".test." in fa.path)
@@ -104,7 +98,6 @@ class TestGenerator:
         ]
 
         if not testable_files:
-            # Fallback to all files if none matched the filter
             testable_files = [fa for fa in project.files if fa.language in ("python", "javascript")]
 
         if not testable_files:
@@ -116,12 +109,20 @@ class TestGenerator:
                 generated_files=[],
             )
 
-        for fa in testable_files:
-            time.sleep(INTER_FILE_DELAY_SECS)
-            gen_file = self._generate_file_tests(fa, out_dir, graph, framework)
-            if gen_file.error:
-                had_error = True
-            generated_files.append(gen_file)
+        logger.info(f"[PERF] Generating tests for {len(testable_files)} testable files (workers={MAX_TEST_GENERATION_WORKERS})")
+
+        # Parallelize test generation across files
+        if len(testable_files) > 1:
+            with ThreadPoolExecutor(max_workers=MAX_TEST_GENERATION_WORKERS) as executor:
+                futures = [
+                    executor.submit(self._generate_file_tests, fa, out_dir, graph, framework)
+                    for fa in testable_files
+                ]
+                generated_files = [f.result() for f in futures]
+        else:
+            generated_files = [
+                self._generate_file_tests(testable_files[0], out_dir, graph, framework)
+            ]
 
         # Write manifest.json
         manifest_path = os.path.join(out_dir, "manifest.json")
@@ -138,8 +139,10 @@ class TestGenerator:
 
         successful_count = sum(1 for f in generated_files if not f.error)
         status = "completed" if successful_count == len(generated_files) else ("partial" if successful_count > 0 else "failed")
-        if status == "failed" and generated_files:
-            overall_error = generated_files[0].error
+        overall_error = generated_files[0].error if (status == "failed" and generated_files) else None
+
+        duration_s = time.perf_counter() - t0
+        logger.info(f"[PERF] Completed test generation in {duration_s:.2f}s (generated {len(generated_files)} files)")
 
         return TestGenerationResult(
             job_id=os.path.basename(job_dir),
@@ -158,6 +161,7 @@ class TestGenerator:
         framework: str,
     ) -> GeneratedTestFile:
         """Generates unit tests for a single file and saves to disk."""
+        t_start = time.perf_counter()
         file_ctx = self._ctx.build_file_context(fa, graph)
         module_name = _derive_module_name(fa.path)
 
@@ -186,7 +190,6 @@ class TestGenerator:
             from app.runners.test_validator import test_validator
             is_valid, val_reason = test_validator.validate_test_code(code, fa.language, fa.path)
             if not is_valid:
-                # Retry generation with explicit validation error context
                 retry_prompt = (
                     f"{prompt}\n\n"
                     f"CRITICAL FIX: Your previous generated test was rejected because: {val_reason}\n"
@@ -207,7 +210,7 @@ class TestGenerator:
                             content="",
                             error=f"Test quality validation failed: {retry_reason or val_reason}",
                         )
-                except Exception as exc:
+                except Exception:
                     return GeneratedTestFile(
                         path=os.path.join("generated_tests", test_filename).replace("\\", "/"),
                         filename=test_filename,
@@ -217,11 +220,12 @@ class TestGenerator:
                         error=f"Test quality validation failed: {val_reason}",
                     )
 
-            # Write validated generated test file to disk
             with open(dest_path, "w", encoding="utf-8") as f:
                 f.write(code)
 
             estimated_count = _estimate_test_count(code, fa.language)
+            duration_s = time.perf_counter() - t_start
+            logger.info(f"[PERF] Generated {test_filename} ({estimated_count} tests) in {duration_s:.2f}s")
 
             return GeneratedTestFile(
                 path=os.path.join("generated_tests", test_filename).replace("\\", "/"),

@@ -3,16 +3,18 @@ AI provider abstraction layer.
 
 All Gemini API access happens through GeminiProvider only.
 The API key is read from environment variables and never exposed externally.
-Features dynamic model discovery, unavailable model pruning, resilient fallback cascade, and explicit startup diagnostics.
+Features dynamic model discovery, unavailable model pruning, resilient fallback cascade,
+high-performance response caching, and explicit latency metrics.
 """
 import os
 import time
+import hashlib
 import logging
 from typing import Optional, List, Set, Dict, Any
 from app.core.config import settings
 
 logger = logging.getLogger("codeoracle.ai")
-logging.basicConfig(level=logging.INFO)
+logger.setLevel(logging.INFO)
 
 
 class AIProviderError(Exception):
@@ -71,7 +73,7 @@ class AIServiceError(AIProviderError):
 class GeminiProvider:
     """
     Provider implementation for Google Gemini API with dynamic model discovery,
-    unavailable model pruning, and robust multi-tier fallback cascade.
+    unavailable model pruning, robust multi-tier fallback cascade, and high-speed LRU caching.
     """
 
     DEFAULT_FALLBACK_ORDER: List[str] = [
@@ -87,12 +89,14 @@ class GeminiProvider:
 
     TIMEOUT_SECONDS = 30
     MAX_RETRIES = 2
+    CACHE_SIZE_LIMIT = 500
 
     def __init__(self):
         self._client = None
         self._selected_model: Optional[str] = None
         self._discovered_models: Optional[List[str]] = None
         self._unavailable_models: Set[str] = set()
+        self._response_cache: Dict[str, str] = {}
 
     @property
     def MODEL_NAME(self) -> str:
@@ -126,6 +130,7 @@ class GeminiProvider:
         if self._discovered_models is not None and not force_refresh:
             return self._discovered_models
 
+        t0 = time.perf_counter()
         client = self._get_client()
         try:
             models_list = list(client.models.list())
@@ -145,7 +150,8 @@ class GeminiProvider:
                 discovered.append(short_name)
 
             self._discovered_models = discovered
-            logger.info(f"Discovered {len(discovered)} Gemini text models from API: {discovered}")
+            duration_s = time.perf_counter() - t0
+            logger.info(f"[PERF] Discovered {len(discovered)} Gemini text models in {duration_s:.2f}s: {discovered}")
             return self._discovered_models
 
         except AIProviderError:
@@ -162,9 +168,15 @@ class GeminiProvider:
     def get_candidate_models(self) -> List[str]:
         """
         Builds the candidate fallback order starting with active selected model (if any),
-        followed by user-configured model, standard fallback cascade, and discovered API models,
+        followed by user-configured model, discovered API models, and standard fallback cascade,
         excluding any models known to return 404/unavailable.
         """
+        if self._discovered_models is None:
+            try:
+                self.discover_models()
+            except Exception:
+                pass
+
         candidates: List[str] = []
 
         # 1. Active selected model first
@@ -175,29 +187,43 @@ class GeminiProvider:
         if settings.GEMINI_MODEL and settings.GEMINI_MODEL not in self._unavailable_models:
             candidates.append(settings.GEMINI_MODEL)
 
-        # 3. Standard fallback order
-        for m in self.DEFAULT_FALLBACK_ORDER:
-            if m not in self._unavailable_models:
-                candidates.append(m)
-
-        # 4. Discovered models from API
+        # 3. Discovered models from API (prioritized over unverified fallbacks)
         if self._discovered_models:
+            # Prioritize fast flash models among discovered
+            flash_discovered = [m for m in self._discovered_models if "flash" in m.lower() and m not in self._unavailable_models]
+            candidates.extend(flash_discovered)
             for m in self._discovered_models:
                 if m not in self._unavailable_models and m not in candidates:
                     candidates.append(m)
 
+        # 4. Standard fallback order
+        for m in self.DEFAULT_FALLBACK_ORDER:
+            if m not in self._unavailable_models and m not in candidates:
+                candidates.append(m)
+
         return list(dict.fromkeys(candidates))
 
-    def generate(self, prompt: str, temperature: float = 0.2) -> str:
+    def _get_cache_key(self, prompt: str, temperature: float) -> str:
+        """Generates a unique SHA-256 cache key for prompt and temperature."""
+        content = f"{prompt}::{temperature:.2f}"
+        return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+    def generate(self, prompt: str, temperature: float = 0.2, bypass_cache: bool = False) -> str:
         """
-        Sends a prompt to Gemini with automatic model discovery and multi-tier fallback.
+        Sends a prompt to Gemini with response caching, automatic model discovery, and multi-tier fallback.
         Handles quota, timeout, and service failures with appropriate error types.
         """
+        cache_key = self._get_cache_key(prompt, temperature)
+        if not bypass_cache and cache_key in self._response_cache:
+            logger.info(f"[PERF] Gemini Cache HIT (<1ms) for prompt hash {cache_key[:8]}")
+            return self._response_cache[cache_key]
+
         client = self._get_client()
         candidate_models = self.get_candidate_models()
 
         last_error = None
         attempted_models: List[str] = []
+        t0 = time.perf_counter()
 
         for model_name in candidate_models:
             attempted_models.append(model_name)
@@ -206,6 +232,7 @@ class GeminiProvider:
             while attempt <= self.MAX_RETRIES:
                 try:
                     from google.genai import types as genai_types
+                    req_start = time.perf_counter()
                     response = client.models.generate_content(
                         model=model_name,
                         contents=prompt,
@@ -219,12 +246,24 @@ class GeminiProvider:
                     if not response or not response.text:
                         raise AIResponseError("Empty text in Gemini response.")
 
-                    # Successfully generated content — cache active model
+                    result = response.text.strip()
+                    req_duration = time.perf_counter() - req_start
+
+                    # Cache active model
                     if self._selected_model != model_name:
                         self._selected_model = model_name
                         logger.info(f"Successfully selected active Gemini model: {model_name}")
 
-                    return response.text.strip()
+                    # Store in LRU cache
+                    if len(self._response_cache) >= self.CACHE_SIZE_LIMIT:
+                        # Evict oldest 50 entries
+                        for k in list(self._response_cache.keys())[:50]:
+                            self._response_cache.pop(k, None)
+                    self._response_cache[cache_key] = result
+
+                    total_duration = time.perf_counter() - t0
+                    logger.info(f"[PERF] Gemini generate ({model_name}) completed in {req_duration:.2f}s (total: {total_duration:.2f}s)")
+                    return result
 
                 except AIProviderError:
                     raise

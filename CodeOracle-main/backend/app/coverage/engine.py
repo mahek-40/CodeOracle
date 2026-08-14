@@ -1,10 +1,12 @@
 """
 Coverage improvement engine — orchestrates the iterative targeted test generation
 and Docker sandbox execution loop with bounded retries to achieve >60% line coverage.
+Features high performance, minimal delay, and explicit execution metrics.
 """
 import os
 import ast
 import time
+import logging
 from typing import Optional, List, Dict, Any
 from app.analyzers.base.schema import ProjectAnalysis, FileAnalysis
 from app.graph.schema import DependencyGraph
@@ -24,9 +26,10 @@ from app.coverage.targeted_builder import (
     targeted_context_builder,
 )
 
+logger = logging.getLogger("codeoracle.coverage.engine")
+
 MAX_COVERAGE_RETRIES = 3
 TARGET_COVERAGE_PERCENT = 60.0
-INTER_RETRY_DELAY_SECS = 0.3
 
 
 def _clean_code_blocks(text: str) -> str:
@@ -109,22 +112,30 @@ class CoverageEngine:
         """
         Runs the existing generated test suite and returns the real measured coverage report.
         """
+        t0 = time.perf_counter()
         job_id = os.path.basename(job_dir)
         primary_lang = project.languages[0] if project.languages else "python"
         framework = "pytest" if primary_lang == "python" else "vitest"
 
         # Check if tests exist; if not, generate initial tests
         tests_dir = os.path.join(job_dir, "generated_tests")
-        if not os.path.exists(tests_dir) or not os.listdir(tests_dir):
+        test_files = []
+        if os.path.exists(tests_dir):
+            test_files = [f for f in os.listdir(tests_dir) if (f.startswith("test_") or f.endswith("_test.py") or ".test." in f)]
+
+        if not test_files:
+            logger.info(f"[PERF] No tests found in {tests_dir}. Generating initial tests...")
             self.generator.generate_tests(project, job_dir, graph)
 
         # Run in Docker sandbox with coverage
         exec_result = self.runner.run_tests(job_dir, language=primary_lang, framework=framework)
 
+        duration_s = time.perf_counter() - t0
+        logger.info(f"[PERF] Completed coverage measurement in {duration_s:.2f}s (tests: {exec_result.total_tests})")
+
         if exec_result.coverage_report:
             return exec_result.coverage_report
 
-        # If execution failed or coverage was not produced, return explicit failed report
         failure_stage = exec_result.stage or "coverage_collection"
         error_msg = exec_result.error or f"Coverage report was not produced by the test runner (stage: {failure_stage})."
 
@@ -161,6 +172,7 @@ class CoverageEngine:
         6. Re-run in Docker sandbox with coverage.
         7. Repeat up to MAX_COVERAGE_RETRIES (bounded limit).
         """
+        t0 = time.perf_counter()
         job_id = os.path.basename(job_dir)
         primary_lang = project.languages[0] if project.languages else "python"
         framework = "pytest" if primary_lang == "python" else "vitest"
@@ -183,7 +195,7 @@ class CoverageEngine:
             timestamp=time.time(),
         ))
 
-        # If baseline coverage failed (e.g. dependency error or execution crash), return failure immediately
+        # If baseline coverage failed, return failure immediately
         if baseline_report.status == "failed" or not baseline_report.files:
             return CoverageImprovementResult(
                 job_id=job_id,
@@ -200,6 +212,7 @@ class CoverageEngine:
 
         # Check stopping condition right away
         if current_cov >= self.target_coverage:
+            logger.info(f"[PERF] Baseline coverage {current_cov}% already >= target {self.target_coverage}%. Stopping early.")
             return CoverageImprovementResult(
                 job_id=job_id,
                 initial_coverage=initial_cov,
@@ -217,10 +230,8 @@ class CoverageEngine:
         os.makedirs(tests_dir, exist_ok=True)
 
         for retry_num in range(1, self.max_retries + 1):
-            time.sleep(INTER_RETRY_DELAY_SECS)
             retry_start_time = time.time()
 
-            # Find files that need additional coverage, sorted by most uncovered lines
             files_to_improve = [
                 f for f in current_report.files
                 if f.coverage_percent < self.target_coverage or f.uncovered_lines_count > 0
@@ -233,9 +244,7 @@ class CoverageEngine:
             new_tests_count = 0
             targeted_areas: List[str] = []
 
-            # Generate targeted tests for top 3 uncovered files per iteration to stay bounded
             for file_cov in files_to_improve[:3]:
-                # Find matching FileAnalysis
                 fa = next((f for f in project.files if f.path == file_cov.path), None)
                 if not fa:
                     continue
@@ -258,41 +267,30 @@ class CoverageEngine:
                     test_file_name = f"{stem}.targeted.iter{retry_num}.test.js"
 
                 try:
-                    raw_code = self.provider.generate(prompt, temperature=0.1)
-                    clean_code = _clean_code_blocks(raw_code)
+                    raw_text = self.provider.generate(prompt, temperature=0.1)
+                    code = _clean_code_blocks(raw_text)
 
-                    if fa.language == "python":
-                        try:
-                            ast.parse(clean_code)
-                        except SyntaxError:
-                            pass
-
-                    # Write new targeted test file to disk
                     dest_path = os.path.join(tests_dir, test_file_name)
                     with open(dest_path, "w", encoding="utf-8") as f:
-                        f.write(clean_code)
+                        f.write(code)
 
                     new_tests_count += 1
-                except AIProviderError:
-                    # Continue to other files if single call fails
-                    continue
+                except Exception as exc:
+                    logger.warning(f"Targeted test generation failed for {fa.path}: {exc}")
 
-            # Execute updated suite with Docker runner
-            exec_res = self.runner.run_tests(job_dir, language=primary_lang, framework=framework)
+            if new_tests_count == 0:
+                break
+
+            # Re-run in sandbox with new targeted tests
+            new_report = self.measure_coverage(project, job_dir, graph)
+            new_cov = new_report.overall_coverage_percent
+            gain = round(new_cov - current_cov, 2)
             duration_ms = int((time.time() - retry_start_time) * 1000)
-
-            if exec_res.coverage_report:
-                current_report = exec_res.coverage_report
-                prev_cov = current_cov
-                current_cov = current_report.overall_coverage_percent
-                gain = round(current_cov - prev_cov, 2)
-            else:
-                gain = 0.0
 
             iterations.append(CoverageIteration(
                 iteration=retry_num,
-                test_count=exec_res.total_tests,
-                coverage_percent=current_cov,
+                test_count=new_report.total_covered_lines,
+                coverage_percent=new_cov,
                 coverage_gain=gain,
                 new_tests_generated=new_tests_count,
                 target_uncovered_areas=targeted_areas,
@@ -300,29 +298,27 @@ class CoverageEngine:
                 timestamp=time.time(),
             ))
 
-            # Check if target is achieved
-            if current_cov >= self.target_coverage:
-                return CoverageImprovementResult(
-                    job_id=job_id,
-                    initial_coverage=initial_cov,
-                    final_coverage=current_cov,
-                    coverage_gain=round(current_cov - initial_cov, 2),
-                    target_reached=True,
-                    status="target_reached",
-                    total_iterations=len(iterations),
-                    iterations=iterations,
-                    latest_report=current_report,
-                )
+            current_cov = new_cov
+            current_report = new_report
 
-        # Loop completed without reaching 60%
-        final_gain = round(current_cov - initial_cov, 2)
+            if current_cov >= self.target_coverage:
+                break
+
+        overall_status = (
+            "target_reached" if current_cov >= self.target_coverage
+            else ("max_retries_reached" if len(iterations) > self.max_retries else "completed")
+        )
+
+        total_duration = time.perf_counter() - t0
+        logger.info(f"[PERF] Coverage improvement workflow finished in {total_duration:.2f}s ({initial_cov}% -> {current_cov}%)")
+
         return CoverageImprovementResult(
             job_id=job_id,
             initial_coverage=initial_cov,
             final_coverage=current_cov,
-            coverage_gain=final_gain,
-            target_reached=(current_cov >= self.target_coverage),
-            status="max_retries_reached" if current_cov < self.target_coverage else "target_reached",
+            coverage_gain=round(current_cov - initial_cov, 2),
+            target_reached=current_cov >= self.target_coverage,
+            status=overall_status,
             total_iterations=len(iterations),
             iterations=iterations,
             latest_report=current_report,

@@ -1,10 +1,12 @@
 """
 Dependency Manager — Detects and installs project dependencies (Python and JavaScript)
 prior to test execution in the isolated sandbox or local test environment.
-Features lockfile detection, strict command formatting, cross-platform execution, and detailed error tracking.
+Features lockfile detection, strict command formatting, cross-platform execution,
+dependency caching, and detailed error tracking.
 """
 import os
 import sys
+import time
 import shutil
 import logging
 import subprocess
@@ -85,7 +87,6 @@ class DependencyManager:
         Executes command safely cross-platform (handling Windows cmd vs POSIX list).
         """
         if isinstance(cmd, str):
-            # String command with shell=True
             res = subprocess.run(
                 cmd,
                 cwd=cwd,
@@ -96,9 +97,7 @@ class DependencyManager:
             )
             return res.returncode, res.stdout or "", res.stderr or ""
         else:
-            # List command with shell=False (on POSIX) or handled on Windows
             if sys.platform == "win32":
-                # On Windows, convert list to string if running a shell command like npm/npx
                 cmd_str = " ".join(cmd)
                 res = subprocess.run(
                     cmd_str,
@@ -127,11 +126,13 @@ class DependencyManager:
     ) -> Tuple[bool, str, str, Optional[str]]:
         """
         Installs dependencies for the target workspace.
+        Never reinstalls dependencies if already installed.
         Returns (success, stage, install_logs, error_message).
         """
         if not os.path.exists(job_dir):
             return False, "dependency_installation", "", f"Job directory '{job_dir}' does not exist."
 
+        t0 = time.perf_counter()
         manifests = self.detect_dependencies(job_dir, language)
         if not manifests:
             return (
@@ -155,6 +156,14 @@ class DependencyManager:
                     continue
 
                 display_rel = m['rel_dir'] or "."
+
+                # Check if already installed
+                sentinel = os.path.join(cwd, ".deps_installed")
+                if os.path.exists(sentinel):
+                    logger.info(f"[PERF] Python dependencies already installed in {cwd}. Skipping pip install.")
+                    combined_logs.append(f"Dependencies already installed for {m_type} (in ./{display_rel}). Skipping.\n")
+                    continue
+
                 combined_logs.append(f"=== Installing Python dependencies from {m_type} (in ./{display_rel}) ===")
 
                 if m_type == "requirements.txt":
@@ -181,6 +190,13 @@ class DependencyManager:
                         logger.error(error_msg)
                         return False, "dependency_installation", "\n".join(combined_logs), error_msg
 
+                    # Mark as installed
+                    try:
+                        with open(sentinel, "w") as f:
+                            f.write("installed\n")
+                    except Exception:
+                        pass
+
                 except subprocess.TimeoutExpired:
                     error_msg = f"Dependency installation timed out after {timeout_seconds}s for {m_type}."
                     combined_logs.append(f"[TIMEOUT] {error_msg}")
@@ -190,6 +206,8 @@ class DependencyManager:
                     combined_logs.append(f"[ERROR] {error_msg}")
                     return False, "dependency_installation", "\n".join(combined_logs), error_msg
 
+            duration_s = time.perf_counter() - t0
+            logger.info(f"[PERF] Python dependency installation completed in {duration_s:.2f}s")
             return True, "dependency_installation", "\n".join(combined_logs), None
 
         elif lang in ("javascript", "typescript"):
@@ -200,14 +218,20 @@ class DependencyManager:
 
                 has_lock = m.get("has_lock", False)
                 display_rel = m['rel_dir'] or "."
+
+                # Check if already installed
+                node_modules = os.path.join(cwd, "node_modules")
+                sentinel = os.path.join(cwd, ".deps_installed")
+                if os.path.exists(sentinel) or (os.path.isdir(node_modules) and len(os.listdir(node_modules)) > 0):
+                    logger.info(f"[PERF] JavaScript dependencies already installed in {cwd}. Skipping npm install.")
+                    combined_logs.append(f"JavaScript dependencies already installed (node_modules present in ./{display_rel}). Skipping.\n")
+                    continue
+
                 combined_logs.append(f"=== Installing JavaScript dependencies (in ./{display_rel}) ===")
 
-                # Handle lockfile vs package.json only
                 if has_lock:
-                    cmd_action = "ci"
                     cmd_list = ["npm", "ci", "--no-audit", "--no-fund"]
                 else:
-                    cmd_action = "install"
                     cmd_list = ["npm", "install", "--no-audit", "--no-fund"]
 
                 cmd_display = " ".join(cmd_list)
@@ -222,7 +246,7 @@ class DependencyManager:
                     if stderr:
                         combined_logs.append(f"[STDERR]\n{stderr}")
 
-                    # If npm ci fails (e.g. lockfile version mismatch or missing dependencies in lockfile), fallback to npm install
+                    # Fallback on lockfile mismatch
                     if returncode != 0 and has_lock:
                         fallback_cmd = ["npm", "install", "--no-audit", "--no-fund"]
                         fallback_display = " ".join(fallback_cmd)
@@ -241,6 +265,13 @@ class DependencyManager:
                         logger.error(error_msg)
                         return False, "dependency_installation", "\n".join(combined_logs), error_msg
 
+                    # Mark as installed
+                    try:
+                        with open(sentinel, "w") as f:
+                            f.write("installed\n")
+                    except Exception:
+                        pass
+
                 except subprocess.TimeoutExpired:
                     error_msg = f"npm install timed out after {timeout_seconds}s in ./{display_rel}."
                     combined_logs.append(f"[TIMEOUT] {error_msg}")
@@ -250,6 +281,8 @@ class DependencyManager:
                     combined_logs.append(f"[ERROR] {error_msg}")
                     return False, "dependency_installation", "\n".join(combined_logs), error_msg
 
+            duration_s = time.perf_counter() - t0
+            logger.info(f"[PERF] JS dependency installation completed in {duration_s:.2f}s")
             return True, "dependency_installation", "\n".join(combined_logs), None
 
         return True, "dependency_installation", "Unsupported language for dependency manager.\n", None

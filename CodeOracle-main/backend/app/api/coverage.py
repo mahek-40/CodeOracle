@@ -3,11 +3,13 @@ Coverage API — /api/jobs/{job_id}/coverage/*
 Measures real test coverage and runs targeted test improvement loops.
 """
 import os
+import time
 import logging
 import traceback
 from fastapi import APIRouter, HTTPException, status
 from app.jobs.manager import job_manager
 from app.graph.builder import graph_builder
+from app.graph.schema import DependencyGraph
 from app.analyzers.base.schema import ProjectAnalysis
 from app.coverage.engine import coverage_engine
 from app.ai.provider import (
@@ -27,6 +29,7 @@ async def run_job_coverage(job_id: str):
     """
     Executes existing tests in the Docker sandbox and measures real line coverage.
     """
+    t_start = time.perf_counter()
     logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/coverage/run | Stage: coverage_measurement | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
@@ -55,11 +58,19 @@ async def run_job_coverage(job_id: str):
 
     try:
         project_analysis = ProjectAnalysis.model_validate(stats)
-        graph = graph_builder.build(project_analysis)
+
+        # Retrieve cached dependency graph or build
+        if job.get("graph"):
+            graph = DependencyGraph.model_validate(job["graph"])
+        else:
+            graph = graph_builder.build(project_analysis)
+            job_manager.save_job_field(job_id, "graph", graph.model_dump())
 
         report = coverage_engine.measure_coverage(project_analysis, job_dir, graph)
         job_manager.save_job_field(job_id, "coverage_report", report.model_dump())
-        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/coverage/run | Overall: {report.overall_coverage_percent}% | Covered: {report.total_covered_lines}/{report.total_lines}")
+
+        total_duration = time.perf_counter() - t_start
+        logger.info(f"[PERF] POST /api/jobs/{job_id}/coverage/run completed in {total_duration:.2f}s | Overall: {report.overall_coverage_percent}%")
         return report.model_dump()
 
     except Exception as exc:
@@ -76,6 +87,7 @@ async def improve_job_coverage(job_id: str):
     Runs iterative targeted test generation to improve line coverage toward >60%.
     Bounded to MAX_COVERAGE_RETRIES (3 retries).
     """
+    t_start = time.perf_counter()
     logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/coverage/improve | Stage: coverage_improvement | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
@@ -104,14 +116,21 @@ async def improve_job_coverage(job_id: str):
 
     try:
         project_analysis = ProjectAnalysis.model_validate(stats)
-        graph = graph_builder.build(project_analysis)
+
+        # Retrieve cached dependency graph or build
+        if job.get("graph"):
+            graph = DependencyGraph.model_validate(job["graph"])
+        else:
+            graph = graph_builder.build(project_analysis)
+            job_manager.save_job_field(job_id, "graph", graph.model_dump())
 
         result = coverage_engine.improve_coverage(project_analysis, job_dir, graph)
         job_manager.save_job_field(job_id, "coverage_improvement", result.model_dump())
         if result.latest_report:
             job_manager.save_job_field(job_id, "coverage_report", result.latest_report.model_dump())
 
-        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/coverage/improve | Status: {result.status} | Gain: +{result.coverage_gain}% | Final: {result.final_coverage}%")
+        total_duration = time.perf_counter() - t_start
+        logger.info(f"[PERF] POST /api/jobs/{job_id}/coverage/improve completed in {total_duration:.2f}s | {result.initial_coverage}% -> {result.final_coverage}%")
         return result.model_dump()
 
     except AIKeyMissingError as exc:
@@ -139,19 +158,18 @@ async def improve_job_coverage(job_id: str):
             detail={"error": "ai_service", "message": exc.message}
         )
     except Exception as exc:
-        logger.exception(f"[FAILURE] Unexpected exception during coverage improvement for job {job_id}: {exc}\n{traceback.format_exc()}")
+        logger.exception(f"[FAILURE] Exception during coverage improve for job {job_id}: {exc}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
-            detail={"error": "internal", "message": str(exc)}
+            detail={"error": "coverage_improvement_error", "message": str(exc)}
         )
 
 
 @router.get("/{job_id}/coverage")
 async def get_job_coverage(job_id: str):
     """
-    Returns latest coverage summary, per-file line breakdown, and iteration history.
+    Returns the latest measured coverage report and improvement results for a job.
     """
-    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/coverage")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(

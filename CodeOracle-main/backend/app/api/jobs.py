@@ -1,9 +1,12 @@
+import time
+import logging
 from fastapi import APIRouter, HTTPException, status
 from app.jobs.manager import job_manager
 from app.graph.builder import graph_builder
 from app.analyzers.base.schema import ProjectAnalysis
 
 router = APIRouter(prefix="/jobs", tags=["Jobs"])
+logger = logging.getLogger("codeoracle.api.jobs")
 
 
 @router.get("/{job_id}")
@@ -22,7 +25,7 @@ async def get_job_status(job_id: str):
 @router.get("/{job_id}/graph")
 async def get_job_graph(job_id: str):
     """
-    Builds and returns the dependency graph for a completed job.
+    Returns cached or builds the dependency graph for a completed job.
     Graph is derived from the normalized ProjectAnalysis produced in Phase 2.
     """
     job = job_manager.get_job(job_id)
@@ -38,6 +41,12 @@ async def get_job_graph(job_id: str):
             detail=f"Job '{job_id}' is not yet completed (status: {job.get('status')})."
         )
 
+    # Check cached graph first
+    cached_graph = job.get("graph")
+    if cached_graph:
+        logger.info(f"[PERF] Returning cached dependency graph for job {job_id}")
+        return cached_graph
+
     stats = job.get("stats")
     if not stats:
         raise HTTPException(
@@ -46,9 +55,13 @@ async def get_job_graph(job_id: str):
         )
 
     try:
+        t0 = time.perf_counter()
         project_analysis = ProjectAnalysis.model_validate(stats)
         graph = graph_builder.build(project_analysis)
-        return graph.model_dump()
+        graph_dict = graph.model_dump()
+        job_manager.save_job_field(job_id, "graph", graph_dict)
+        logger.info(f"[PERF] Graph built and cached in {time.perf_counter() - t0:.2f}s for job {job_id}")
+        return graph_dict
     except Exception as exc:
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,

@@ -1,14 +1,16 @@
 """
 Tests API — /api/jobs/{job_id}/tests/*
-Generates AI unit tests and executes them in an isolated Docker container.
+Generates AI unit tests and executes them in an isolated Docker container or host sandbox.
 """
 import os
 import json
+import time
 import logging
 import traceback
 from fastapi import APIRouter, HTTPException, status
 from app.jobs.manager import job_manager
 from app.graph.builder import graph_builder
+from app.graph.schema import DependencyGraph
 from app.analyzers.base.schema import ProjectAnalysis
 from app.runners.test_generator import test_generator
 from app.runners.docker_runner import docker_runner
@@ -30,6 +32,7 @@ async def generate_tests_for_job(job_id: str):
     Generates runnable unit tests for an analysed project using Gemini.
     Tests are saved separately in {job_dir}/generated_tests/.
     """
+    t_start = time.perf_counter()
     logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/tests/generate | Stage: test_generation | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
@@ -58,11 +61,19 @@ async def generate_tests_for_job(job_id: str):
 
     try:
         project_analysis = ProjectAnalysis.model_validate(stats)
-        graph = graph_builder.build(project_analysis)
+
+        # Retrieve cached dependency graph or build
+        if job.get("graph"):
+            graph = DependencyGraph.model_validate(job["graph"])
+        else:
+            graph = graph_builder.build(project_analysis)
+            job_manager.save_job_field(job_id, "graph", graph.model_dump())
 
         result = test_generator.generate_tests(project_analysis, job_dir, graph)
         job_manager.save_job_field(job_id, "test_generation", result.model_dump())
-        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/tests/generate | Status: {result.status} | Files: {len(result.generated_files)}")
+
+        total_duration = time.perf_counter() - t_start
+        logger.info(f"[PERF] POST /api/jobs/{job_id}/tests/generate completed in {total_duration:.2f}s | Files: {len(result.generated_files)}")
         return result.model_dump()
 
     except AIKeyMissingError as exc:
@@ -100,9 +111,10 @@ async def generate_tests_for_job(job_id: str):
 @router.post("/{job_id}/tests/run")
 async def run_tests_for_job(job_id: str):
     """
-    Runs generated tests inside an isolated Docker sandbox container.
+    Runs generated tests inside an isolated Docker sandbox container or safe subprocess fallback.
     Returns test counts, stdout, stderr, exit code, and execution duration.
     """
+    t_start = time.perf_counter()
     logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/tests/run | Stage: test_execution | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
@@ -130,7 +142,9 @@ async def run_tests_for_job(job_id: str):
         job_manager.save_job_field(job_id, "test_execution", result.model_dump())
         if result.coverage_report:
             job_manager.save_job_field(job_id, "coverage_report", result.coverage_report.model_dump())
-        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/tests/run | Status: {result.status} | Passed: {result.passed_tests}/{result.total_tests}")
+
+        total_duration = time.perf_counter() - t_start
+        logger.info(f"[PERF] POST /api/jobs/{job_id}/tests/run completed in {total_duration:.2f}s | Passed: {result.passed_tests}/{result.total_tests}")
         return result.model_dump()
     except Exception as exc:
         logger.exception(f"[FAILURE] Exception during test execution for job {job_id}: {exc}\n{traceback.format_exc()}")
@@ -143,9 +157,8 @@ async def run_tests_for_job(job_id: str):
 @router.get("/{job_id}/tests")
 async def get_job_tests(job_id: str):
     """
-    Retrieves the generated test files and test execution results for a job.
+    Returns test generation and execution metadata for a job.
     """
-    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/tests")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(
@@ -153,28 +166,8 @@ async def get_job_tests(job_id: str):
             detail=f"Job '{job_id}' not found."
         )
 
-    job_dir = job.get("job_dir") or job_manager.get_job_dir(job_id)
-    generation_data = job.get("test_generation")
-
-    # Fallback to reading manifest from disk if present
-    if not generation_data and job_dir:
-        manifest_path = os.path.join(job_dir, "generated_tests", "manifest.json")
-        if os.path.exists(manifest_path):
-            try:
-                with open(manifest_path, "r", encoding="utf-8") as f:
-                    manifest = json.load(f)
-                    generation_data = {
-                        "job_id": job_id,
-                        "status": "completed",
-                        "framework": manifest.get("framework", "pytest"),
-                        "total_files": len(manifest.get("files", [])),
-                        "generated_files": manifest.get("files", []),
-                    }
-            except Exception:
-                pass
-
     return {
         "job_id": job_id,
-        "generation": generation_data,
+        "generation": job.get("test_generation"),
         "execution": job.get("test_execution"),
     }

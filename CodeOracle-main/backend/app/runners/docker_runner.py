@@ -39,6 +39,8 @@ class DockerRunner:
     with automatic dependency installation and real coverage collection.
     """
 
+    DOCKER_CHECK_TTL_SECS = 120.0
+
     def __init__(
         self,
         timeout_seconds: int = DEFAULT_TIMEOUT_SECONDS,
@@ -52,27 +54,50 @@ class DockerRunner:
         self.cpu_limit = cpu_limit
         self.pids_limit = pids_limit
         self.allow_local_fallback = allow_local_fallback
+        self._docker_cache: Optional[Tuple[bool, str]] = None
+        self._docker_cache_time: float = 0.0
 
-    def is_docker_available(self) -> Tuple[bool, str]:
+    def is_docker_available(self, force_refresh: bool = False) -> Tuple[bool, str]:
         """
         Checks if Docker CLI is installed and the Docker daemon is accessible.
+        Caches result for 120 seconds to eliminate repeated 5s subprocess probes.
         """
+        now = time.time()
+        if not force_refresh and self._docker_cache is not None and (now - self._docker_cache_time) < self.DOCKER_CHECK_TTL_SECS:
+            return self._docker_cache
+
         try:
+            t0 = time.perf_counter()
             res = subprocess.run(
                 ["docker", "info"],
                 capture_output=True,
                 text=True,
                 timeout=5,
             )
+            duration_s = time.perf_counter() - t0
             if res.returncode == 0:
-                return True, ""
-            return False, res.stderr.strip() or res.stdout.strip() or "Docker daemon returned non-zero status"
+                result = (True, "")
+            else:
+                result = (False, res.stderr.strip() or res.stdout.strip() or "Docker daemon returned non-zero status")
+            logger.info(f"[PERF] Docker capability check completed in {duration_s:.2f}s (available={result[0]})")
+            self._docker_cache = result
+            self._docker_cache_time = now
+            return result
         except FileNotFoundError:
-            return False, "Docker CLI is not installed on PATH"
+            result = (False, "Docker CLI is not installed on PATH")
+            self._docker_cache = result
+            self._docker_cache_time = now
+            return result
         except subprocess.TimeoutExpired:
-            return False, "Docker info check timed out"
+            result = (False, "Docker info check timed out")
+            self._docker_cache = result
+            self._docker_cache_time = now
+            return result
         except Exception as exc:
-            return False, str(exc)
+            result = (False, str(exc))
+            self._docker_cache = result
+            self._docker_cache_time = now
+            return result
 
     def run_tests(
         self,
