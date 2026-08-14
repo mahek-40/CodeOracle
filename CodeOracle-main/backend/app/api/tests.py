@@ -4,6 +4,8 @@ Generates AI unit tests and executes them in an isolated Docker container.
 """
 import os
 import json
+import logging
+import traceback
 from fastapi import APIRouter, HTTPException, status
 from app.jobs.manager import job_manager
 from app.graph.builder import graph_builder
@@ -18,6 +20,7 @@ from app.ai.provider import (
     AIServiceError,
 )
 
+logger = logging.getLogger("codeoracle.api.tests")
 router = APIRouter(prefix="/jobs", tags=["Tests"])
 
 
@@ -27,14 +30,17 @@ async def generate_tests_for_job(job_id: str):
     Generates runnable unit tests for an analysed project using Gemini.
     Tests are saved separately in {job_dir}/generated_tests/.
     """
+    logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/tests/generate | Stage: test_generation | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
+        logger.warning(f"[FAILURE] Job '{job_id}' not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job '{job_id}' not found."
         )
 
     if job.get("status") != "completed":
+        logger.warning(f"[FAILURE] Job '{job_id}' is not yet completed (status: {job.get('status')})")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' is not yet completed (status: {job.get('status')})."
@@ -42,6 +48,7 @@ async def generate_tests_for_job(job_id: str):
 
     stats = job.get("stats")
     if not stats:
+        logger.warning(f"[FAILURE] Job '{job_id}' has no analysis data")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' has no analysis data."
@@ -55,30 +62,35 @@ async def generate_tests_for_job(job_id: str):
 
         result = test_generator.generate_tests(project_analysis, job_dir, graph)
         job_manager.save_job_field(job_id, "test_generation", result.model_dump())
-
+        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/tests/generate | Status: {result.status} | Files: {len(result.generated_files)}")
         return result.model_dump()
 
     except AIKeyMissingError as exc:
+        logger.error(f"[FAILURE] AIKeyMissingError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": "configuration", "message": exc.message}
         )
     except AIQuotaError as exc:
+        logger.error(f"[FAILURE] AIQuotaError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": "quota", "message": exc.message}
         )
     except AITimeoutError as exc:
+        logger.error(f"[FAILURE] AITimeoutError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={"error": "timeout", "message": exc.message}
         )
     except (AIResponseError, AIServiceError) as exc:
+        logger.error(f"[FAILURE] AIServiceError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": "ai_service", "message": exc.message}
         )
     except Exception as exc:
+        logger.exception(f"[FAILURE] Unexpected exception during test generation for job {job_id}: {exc}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "internal", "message": str(exc)}
@@ -91,14 +103,17 @@ async def run_tests_for_job(job_id: str):
     Runs generated tests inside an isolated Docker sandbox container.
     Returns test counts, stdout, stderr, exit code, and execution duration.
     """
+    logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/tests/run | Stage: test_execution | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
+        logger.warning(f"[FAILURE] Job '{job_id}' not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job '{job_id}' not found."
         )
 
     if job.get("status") != "completed":
+        logger.warning(f"[FAILURE] Job '{job_id}' is not yet completed (status: {job.get('status')})")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' is not yet completed (status: {job.get('status')})."
@@ -113,8 +128,12 @@ async def run_tests_for_job(job_id: str):
     try:
         result = docker_runner.run_tests(job_dir, language=primary_lang, framework=framework)
         job_manager.save_job_field(job_id, "test_execution", result.model_dump())
+        if result.coverage_report:
+            job_manager.save_job_field(job_id, "coverage_report", result.coverage_report.model_dump())
+        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/tests/run | Status: {result.status} | Passed: {result.passed_tests}/{result.total_tests}")
         return result.model_dump()
     except Exception as exc:
+        logger.exception(f"[FAILURE] Exception during test execution for job {job_id}: {exc}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "runner_error", "message": str(exc)}
@@ -126,6 +145,7 @@ async def get_job_tests(job_id: str):
     """
     Retrieves the generated test files and test execution results for a job.
     """
+    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/tests")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(

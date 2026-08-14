@@ -59,7 +59,8 @@ export const CoverageDashboard: React.FC<CoverageDashboardProps> = ({
     );
   }
 
-  const isFailed = report.status === 'failed';
+  const hasCoverageData = (report.files && report.files.length > 0) || (report.total_lines > 0 && report.overall_coverage_percent !== undefined);
+  const isFailed = report.status === 'failed' && !hasCoverageData;
   const currentCoverage = report.overall_coverage_percent ?? 0;
   const isTargetMet = !isFailed && currentCoverage >= 60.0;
   const files: FileCoverage[] = report.files ?? [];

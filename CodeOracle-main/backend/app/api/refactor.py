@@ -4,6 +4,8 @@ Endpoints for generating modernization refactors, retrieving diffs and breaking 
 and validating refactored code against existing test suites in an isolated Docker container.
 """
 import os
+import logging
+import traceback
 from fastapi import APIRouter, HTTPException, status
 from app.jobs.manager import job_manager
 from app.graph.builder import graph_builder
@@ -19,6 +21,7 @@ from app.ai.provider import (
     AIServiceError,
 )
 
+logger = logging.getLogger("codeoracle.api.refactor")
 router = APIRouter(prefix="/jobs", tags=["Refactoring"])
 
 
@@ -27,14 +30,17 @@ async def generate_refactor(job_id: str):
     """
     Analyzes legacy source files and generates proposed modernized code without modifying originals.
     """
+    logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/refactor/generate | Stage: refactor_generation | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
+        logger.warning(f"[FAILURE] Job '{job_id}' not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job '{job_id}' not found."
         )
 
     if job.get("status") != "completed":
+        logger.warning(f"[FAILURE] Job '{job_id}' is not yet completed (status: {job.get('status')})")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' is not yet completed (status: {job.get('status')})."
@@ -42,6 +48,7 @@ async def generate_refactor(job_id: str):
 
     stats = job.get("stats")
     if not stats:
+        logger.warning(f"[FAILURE] Job '{job_id}' has no analysis stats")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' has no analysis stats."
@@ -55,29 +62,35 @@ async def generate_refactor(job_id: str):
 
         result = refactoring_engine.generate_refactor(project_analysis, job_dir, graph)
         job_manager.save_job_field(job_id, "refactor_result", result.model_dump())
+        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/refactor/generate | Status: {result.status} | Files Modified: {result.files_modified}")
         return result.model_dump()
 
     except AIKeyMissingError as exc:
+        logger.error(f"[FAILURE] AIKeyMissingError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             detail={"error": "configuration", "message": exc.message}
         )
     except AIQuotaError as exc:
+        logger.error(f"[FAILURE] AIQuotaError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_429_TOO_MANY_REQUESTS,
             detail={"error": "quota", "message": exc.message}
         )
     except AITimeoutError as exc:
+        logger.error(f"[FAILURE] AITimeoutError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_504_GATEWAY_TIMEOUT,
             detail={"error": "timeout", "message": exc.message}
         )
     except (AIResponseError, AIServiceError) as exc:
+        logger.error(f"[FAILURE] AIServiceError for job {job_id}: {exc.message}")
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail={"error": "ai_service", "message": exc.message}
         )
     except Exception as exc:
+        logger.exception(f"[FAILURE] Unexpected exception during refactoring generation for job {job_id}: {exc}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "internal", "message": str(exc)}
@@ -89,6 +102,7 @@ async def get_refactor(job_id: str):
     """
     Returns latest generated refactor proposals, diffs, and risk summary.
     """
+    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/refactor")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(
@@ -111,6 +125,7 @@ async def get_refactor_warnings(job_id: str):
     """
     Returns all detected breaking change warnings.
     """
+    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/refactor/warnings")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(
@@ -127,6 +142,7 @@ async def get_refactor_diffs(job_id: str):
     """
     Returns structured file diffs for all modified files.
     """
+    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/refactor/diffs")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(
@@ -144,8 +160,10 @@ async def validate_refactor(job_id: str):
     """
     Executes existing generated tests against the refactored code in the Docker sandbox.
     """
+    logger.info(f"[ENDPOINT] POST /api/jobs/{job_id}/refactor/validate | Stage: refactor_validation | Job: {job_id}")
     job = job_manager.get_job(job_id)
     if not job:
+        logger.warning(f"[FAILURE] Job '{job_id}' not found")
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Job '{job_id}' not found."
@@ -153,6 +171,7 @@ async def validate_refactor(job_id: str):
 
     stats = job.get("stats")
     if not stats:
+        logger.warning(f"[FAILURE] Job '{job_id}' has no analysis stats")
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
             detail=f"Job '{job_id}' has no analysis stats."
@@ -177,9 +196,11 @@ async def validate_refactor(job_id: str):
             job["refactor_result"]["validation"] = comparison.model_dump()
             job_manager.save_job_field(job_id, "refactor_result", job["refactor_result"])
 
+        logger.info(f"[SUCCESS] POST /api/jobs/{job_id}/refactor/validate | Status: {comparison.status} | Passed: {comparison.refactored_tests_passed}")
         return comparison.model_dump()
 
     except Exception as exc:
+        logger.exception(f"[FAILURE] Exception during refactor validation for job {job_id}: {exc}\n{traceback.format_exc()}")
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail={"error": "validation_error", "message": str(exc)}
@@ -191,6 +212,7 @@ async def get_refactor_validation(job_id: str):
     """
     Returns latest test validation comparison results.
     """
+    logger.info(f"[ENDPOINT] GET /api/jobs/{job_id}/refactor/validate")
     job = job_manager.get_job(job_id)
     if not job:
         raise HTTPException(
