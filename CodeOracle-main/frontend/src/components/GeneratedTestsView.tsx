@@ -241,6 +241,19 @@ export const GeneratedTestsView: React.FC<GeneratedTestsViewProps> = ({
         </div>
       )}
 
+      {execution?.status === 'dependency_install_failed' && (
+        <div className="px-6 py-3 bg-rose-950/40 border-b border-rose-900/60 flex items-start gap-3 text-xs text-rose-300 font-mono">
+          <AlertTriangle className="h-4 w-4 flex-shrink-0 text-rose-400 mt-0.5" />
+          <div className="space-y-1 flex-1">
+            <p className="font-bold text-white">Dependency Installation Failed</p>
+            <p className="text-[11px] text-rose-300/90 whitespace-pre-wrap">{execution.error || 'Failed to install package dependencies.'}</p>
+            <p className="text-[10px] text-slate-400 pt-0.5">
+              Click the <strong>Dependency Logs</strong> tab below to inspect full package manager logs.
+            </p>
+          </div>
+        </div>
+      )}
+
       {/* Execution & Coverage Summary Bar */}
       {execution && (
         <div className="px-6 py-2.5 bg-[#101726] border-b border-[#1E293B] flex items-center gap-4 flex-wrap text-xs font-mono flex-shrink-0">

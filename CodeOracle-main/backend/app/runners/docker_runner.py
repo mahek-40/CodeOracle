@@ -276,22 +276,36 @@ class DockerRunner:
                 )
 
             elif language in ("javascript", "typescript"):
-                js_cmd = [
+                js_cmd_list = [
                     "npx", "vitest", "run",
                     "generated_tests",
                     "--coverage.enabled=true",
                     "--coverage.reporter=json",
                     "--coverage.reportsDirectory=coverage",
                 ]
-                res = subprocess.run(
-                    js_cmd,
-                    cwd=job_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=self.timeout_seconds,
-                    shell=True,
-                    env=env,
-                )
+                if sys.platform == "win32":
+                    js_cmd_str = " ".join(js_cmd_list)
+                    res = subprocess.run(
+                        js_cmd_str,
+                        cwd=job_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.timeout_seconds,
+                        shell=True,
+                        env=env,
+                    )
+                else:
+                    npx_bin = shutil.which("npx") or "npx"
+                    js_cmd_list[0] = npx_bin
+                    res = subprocess.run(
+                        js_cmd_list,
+                        cwd=job_dir,
+                        capture_output=True,
+                        text=True,
+                        timeout=self.timeout_seconds,
+                        shell=False,
+                        env=env,
+                    )
                 stdout_chunks.append(res.stdout or "")
                 stderr_chunks.append(res.stderr or "")
                 exit_code = res.returncode
