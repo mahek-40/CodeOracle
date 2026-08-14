@@ -79,6 +79,8 @@ async def run_system_diagnostics() -> Dict[str, Any]:
         "status": gemini_status,
         "api_key_configured": api_key_set,
         "model": gemini_provider.MODEL_NAME,
+        "selected_model": gemini_provider._selected_model,
+        "discovered_models": gemini_provider._discovered_models or [],
         "details": gemini_details,
         "latency_ms": probe_latency_ms,
     }

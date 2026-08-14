@@ -3,13 +3,16 @@ AI provider abstraction layer.
 
 All Gemini API access happens through GeminiProvider only.
 The API key is read from environment variables and never exposed externally.
-Other provider classes can implement the same interface in the future.
+Features dynamic model discovery, unavailable model pruning, resilient fallback cascade, and explicit startup diagnostics.
 """
 import os
 import time
-import json
-from typing import Optional
+import logging
+from typing import Optional, List, Set, Dict, Any
 from app.core.config import settings
+
+logger = logging.getLogger("codeoracle.ai")
+logging.basicConfig(level=logging.INFO)
 
 
 class AIProviderError(Exception):
@@ -22,12 +25,11 @@ class AIProviderError(Exception):
 
 
 class AIKeyMissingError(AIProviderError):
-    def __init__(self):
-        super().__init__(
-            "GEMINI_API_KEY is not configured. Set it as an environment variable.",
-            stage="ai_config",
-            retryable=False
-        )
+    def __init__(self, detail: str = ""):
+        msg = "GEMINI_API_KEY is not configured. Set it as an environment variable."
+        if detail:
+            msg = f"{msg} ({detail})"
+        super().__init__(msg, stage="ai_config", retryable=False)
 
 
 class AIQuotaError(AIProviderError):
@@ -68,19 +70,36 @@ class AIServiceError(AIProviderError):
 
 class GeminiProvider:
     """
-    Provider implementation for Google Gemini API.
-    Uses the google-genai SDK. API key comes from environment only.
+    Provider implementation for Google Gemini API with dynamic model discovery,
+    unavailable model pruning, and robust multi-tier fallback cascade.
     """
+
+    DEFAULT_FALLBACK_ORDER: List[str] = [
+        "gemini-2.5-flash",
+        "gemini-2.5-flash-lite",
+        "gemini-2.0-flash",
+        "gemini-1.5-flash",
+        "gemini-flash-latest",
+        "gemini-flash-lite-latest",
+        "gemini-3.7-flash",
+        "gemini-3.1-flash-lite",
+    ]
 
     TIMEOUT_SECONDS = 30
     MAX_RETRIES = 2
 
-    @property
-    def MODEL_NAME(self) -> str:
-        return settings.GEMINI_MODEL or "gemini-2.5-flash"
-
     def __init__(self):
         self._client = None
+        self._selected_model: Optional[str] = None
+        self._discovered_models: Optional[List[str]] = None
+        self._unavailable_models: Set[str] = set()
+
+    @property
+    def MODEL_NAME(self) -> str:
+        """Returns the currently active or configured Gemini model name."""
+        if self._selected_model:
+            return self._selected_model
+        return settings.GEMINI_MODEL or self.DEFAULT_FALLBACK_ORDER[0]
 
     def _get_client(self):
         """Lazy-initialise the Gemini client. Raises AIKeyMissingError if key absent."""
@@ -99,18 +118,91 @@ class GeminiProvider:
 
         return self._client
 
+    def discover_models(self, force_refresh: bool = False) -> List[str]:
+        """
+        Queries the Gemini API to list all available models and filter text generation models.
+        Logs discovered models during startup.
+        """
+        if self._discovered_models is not None and not force_refresh:
+            return self._discovered_models
+
+        client = self._get_client()
+        try:
+            models_list = list(client.models.list())
+            discovered: List[str] = []
+
+            for m in models_list:
+                raw_name = getattr(m, "name", "")
+                short_name = raw_name.replace("models/", "").strip()
+                if not short_name:
+                    continue
+
+                # Filter out non-text models (audio-only, image generation, video, embeddings)
+                skip_keywords = ["imagen", "veo", "embedding", "tts", "aqa", "robotics", "live", "clip"]
+                if any(k in short_name.lower() for k in skip_keywords):
+                    continue
+
+                discovered.append(short_name)
+
+            self._discovered_models = discovered
+            logger.info(f"Discovered {len(discovered)} Gemini text models from API: {discovered}")
+            return self._discovered_models
+
+        except AIProviderError:
+            raise
+        except Exception as exc:
+            err_str = str(exc).lower()
+            if "invalid" in err_str and "key" in err_str:
+                raise AIKeyMissingError(str(exc))
+            if "429" in err_str or "quota" in err_str:
+                raise AIQuotaError(str(exc))
+            logger.warning(f"Could not list Gemini models from API: {exc}")
+            return []
+
+    def get_candidate_models(self) -> List[str]:
+        """
+        Builds the candidate fallback order starting with active selected model (if any),
+        followed by user-configured model, standard fallback cascade, and discovered API models,
+        excluding any models known to return 404/unavailable.
+        """
+        candidates: List[str] = []
+
+        # 1. Active selected model first
+        if self._selected_model and self._selected_model not in self._unavailable_models:
+            candidates.append(self._selected_model)
+
+        # 2. User-specified model if set
+        if settings.GEMINI_MODEL and settings.GEMINI_MODEL not in self._unavailable_models:
+            candidates.append(settings.GEMINI_MODEL)
+
+        # 3. Standard fallback order
+        for m in self.DEFAULT_FALLBACK_ORDER:
+            if m not in self._unavailable_models:
+                candidates.append(m)
+
+        # 4. Discovered models from API
+        if self._discovered_models:
+            for m in self._discovered_models:
+                if m not in self._unavailable_models and m not in candidates:
+                    candidates.append(m)
+
+        return list(dict.fromkeys(candidates))
+
     def generate(self, prompt: str, temperature: float = 0.2) -> str:
         """
-        Sends a single prompt to Gemini and returns the text response.
+        Sends a prompt to Gemini with automatic model discovery and multi-tier fallback.
         Handles quota, timeout, and service failures with appropriate error types.
         """
         client = self._get_client()
-        candidate_models = [self.MODEL_NAME, "gemini-2.5-flash", "gemini-1.5-flash", "gemini-2.0-flash"]
-        # Deduplicate while preserving order
-        candidate_models = list(dict.fromkeys(candidate_models))
+        candidate_models = self.get_candidate_models()
+
+        last_error = None
+        attempted_models: List[str] = []
 
         for model_name in candidate_models:
+            attempted_models.append(model_name)
             attempt = 0
+
             while attempt <= self.MAX_RETRIES:
                 try:
                     from google.genai import types as genai_types
@@ -123,9 +215,14 @@ class GeminiProvider:
                         )
                     )
 
-                    # Validate response
+                    # Validate response text
                     if not response or not response.text:
                         raise AIResponseError("Empty text in Gemini response.")
+
+                    # Successfully generated content — cache active model
+                    if self._selected_model != model_name:
+                        self._selected_model = model_name
+                        logger.info(f"Successfully selected active Gemini model: {model_name}")
 
                     return response.text.strip()
 
@@ -133,34 +230,61 @@ class GeminiProvider:
                     raise
                 except Exception as exc:
                     err_str = str(exc).lower()
+                    last_error = exc
 
-                    if "not_found" in err_str or "404" in err_str or "no longer available" in err_str:
-                        # Model not available in this region/tier, try next candidate model
+                    # 404 NOT_FOUND / no longer available -> prune model and move to next in cascade
+                    if "not_found" in err_str or "404" in err_str or "no longer available" in err_str or "not supported" in err_str:
+                        logger.warning(f"Model '{model_name}' is unavailable ({exc}). Pruning from candidates...")
+                        self._unavailable_models.add(model_name)
+                        if self._selected_model == model_name:
+                            self._selected_model = None
                         break
 
-                    if "429" in err_str or "quota" in err_str or "rate" in err_str:
+                    # 429 Rate Limit / Quota Exceeded -> exponential backoff then try next model or raise
+                    if "429" in err_str or "quota" in err_str or "rate" in err_str or "resource_exhausted" in err_str:
                         if attempt < self.MAX_RETRIES:
                             time.sleep(2 ** attempt)
                             attempt += 1
                             continue
-                        raise AIQuotaError(str(exc))
+                        logger.warning(f"Quota exceeded for '{model_name}'. Trying next fallback model...")
+                        break
 
+                    # Timeout -> retry once then move to next
                     if "timeout" in err_str or "deadline" in err_str or "timed out" in err_str:
-                        raise AITimeoutError()
+                        if attempt < self.MAX_RETRIES:
+                            attempt += 1
+                            continue
+                        break
 
-                    if "invalid" in err_str and "key" in err_str:
-                        raise AIKeyMissingError()
+                    # Invalid API key -> fail immediately
+                    if ("invalid" in err_str and "key" in err_str) or ("api_key" in err_str and "invalid" in err_str):
+                        raise AIKeyMissingError(str(exc))
 
-                    if "500" in err_str or "503" in err_str or "unavailable" in err_str:
+                    # 500/503 Service temporary errors
+                    if "500" in err_str or "503" in err_str or "unavailable" in err_str or "high demand" in err_str:
                         if attempt < self.MAX_RETRIES:
                             time.sleep(1)
                             attempt += 1
                             continue
-                        raise AIServiceError(str(exc))
+                        logger.warning(f"Service error on '{model_name}' ({exc}). Trying next model...")
+                        break
 
-                    raise AIServiceError(str(exc))
+                    logger.warning(f"Error on model '{model_name}': {exc}. Trying fallback...")
+                    break
 
-        raise AIServiceError(f"No suitable Gemini model found among {candidate_models}.")
+        # If all candidates exhausted, query available models from API for actionable diagnostics
+        try:
+            available = self.discover_models()
+        except Exception:
+            available = []
+
+        if not available and last_error and ("quota" in str(last_error).lower() or "429" in str(last_error)):
+            raise AIQuotaError(str(last_error))
+
+        raise AIServiceError(
+            f"No suitable Gemini model found. Attempted fallback order: {attempted_models}. "
+            f"Available models from API: {available if available else 'None'}. Last error: {last_error}"
+        )
 
 
 # Global singleton — the rest of the application uses this
