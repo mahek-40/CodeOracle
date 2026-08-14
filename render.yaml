@@ -3,7 +3,8 @@ services:
   - type: web
     name: codeoracle-backend
     env: docker
-    dockerfilePath: ./Dockerfile
+    rootDir: CodeOracle-main
+    dockerfilePath: Dockerfile
     healthCheckPath: /api/health
     envVars:
       - key: GEMINI_API_KEY
@@ -21,6 +22,7 @@ services:
   - type: web
     name: codeoracle-frontend
     env: static
+    rootDir: CodeOracle-main
     buildCommand: cd frontend && npm install && npm run build
     staticPublishPath: ./frontend/dist
     envVars:

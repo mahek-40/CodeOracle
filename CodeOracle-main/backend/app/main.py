@@ -1,5 +1,5 @@
 import os
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
@@ -76,15 +76,25 @@ if frontend_dist:
 
     @app.get("/{full_path:path}", include_in_schema=False)
     async def serve_spa(full_path: str):
-        # Don't intercept API or docs routes
-        if full_path.startswith("api/") or full_path.startswith("docs") or full_path.startswith("openapi.json") or full_path.startswith("redoc") or full_path == "health":
-            return None
+        # Don't intercept API, health or docs routes - return 404
+        if (
+            full_path.startswith("api/")
+            or full_path == "api"
+            or full_path.startswith("docs")
+            or full_path.startswith("openapi.json")
+            or full_path.startswith("redoc")
+            or full_path == "health"
+        ):
+            raise HTTPException(status_code=404, detail="Endpoint not found")
         # Check if the requested file exists directly inside dist (e.g. favicon.ico, vite.svg)
         candidate_file = os.path.join(frontend_dist, full_path)
         if full_path and os.path.isfile(candidate_file):
             return FileResponse(candidate_file)
         # Fallback to index.html for SPA client-side routing
-        return FileResponse(os.path.join(frontend_dist, "index.html"))
+        index_file = os.path.join(frontend_dist, "index.html")
+        if os.path.isfile(index_file):
+            return FileResponse(index_file)
+        raise HTTPException(status_code=404, detail="Page not found")
 
 
 if __name__ == "__main__":

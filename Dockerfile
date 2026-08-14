@@ -3,11 +3,11 @@ FROM node:20-slim AS frontend-builder
 WORKDIR /app/frontend
 
 # Copy package manifests and install dependencies
-COPY frontend/package*.json ./
+COPY CodeOracle-main/frontend/package*.json ./
 RUN npm ci || npm install
 
 # Copy frontend source code and build production bundle
-COPY frontend/ ./
+COPY CodeOracle-main/frontend/ ./
 RUN npm run build
 
 # ─── Stage 2: Production Python & Node Runtime ───────────────────────────────
@@ -32,11 +32,11 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python backend dependencies
-COPY backend/requirements.txt /app/backend/requirements.txt
+COPY CodeOracle-main/backend/requirements.txt /app/backend/requirements.txt
 RUN pip install --no-cache-dir -r /app/backend/requirements.txt
 
 # Copy backend source code
-COPY backend /app/backend
+COPY CodeOracle-main/backend /app/backend
 
 # Copy built frontend production artifacts from builder stage
 COPY --from=frontend-builder /app/frontend/dist /app/frontend/dist

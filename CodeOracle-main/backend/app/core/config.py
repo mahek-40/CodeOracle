@@ -7,7 +7,8 @@ class Settings(BaseModel):
     APP_NAME: str = "CodeOracle"
     VERSION: str = "0.1.0"
     API_V1_STR: str = "/api"
-    ENV: str = os.getenv("ENV", "development")
+    ENV: str = os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")
+    ENVIRONMENT: str = os.getenv("ENVIRONMENT") or os.getenv("ENV", "development")
     PORT: int = int(os.getenv("PORT", "8000"))
     GEMINI_API_KEY: str = os.getenv("GEMINI_API_KEY", "")
     TEMP_DIR: str = os.getenv("CODEORACLE_TEMP_DIR", "")
